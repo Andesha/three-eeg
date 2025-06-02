@@ -1,13 +1,13 @@
 import * as THREE from 'three';
 
 // Data configuration
-const DATA_CONFIG = {
-  numSources: 60,
-  samplingRate: 600, // Hz
-  duration: 278, // 2 hours in seconds
+let DATA_CONFIG = {
+  numSources: 0, // Will be set from EDF file
+  samplingRate: 0, // Will be set from EDF file
+  duration: 0, // Will be set from EDF file
   maxPointsPerWave: 100, // Maximum points to render per wave
   amplitudeScale: 2.0, // Multiplicative factor for signal amplitude
-} as const;
+};
 
 // Calculate total samples
 const totalSamples = DATA_CONFIG.samplingRate * DATA_CONFIG.duration;
@@ -54,6 +54,15 @@ async function readEDFFile(filePath: string): Promise<{signals: number[][], labe
     const numDataRecords = parseInt(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(236, 244))).trim());
     const durationOfDataRecord = parseFloat(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(244, 252))).trim());
     
+    // Sampling rate: samples per record per channel (assume all channels have the same rate)
+    const samplesPerRecord = parseInt(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(256 + 216 * numSignals, 256 + 216 * numSignals + 8))).trim());
+    const samplingRate = samplesPerRecord / durationOfDataRecord;
+    
+    // Set DATA_CONFIG fields
+    DATA_CONFIG.numSources = numSignals;
+    DATA_CONFIG.samplingRate = samplingRate;
+    DATA_CONFIG.duration = numDataRecords * durationOfDataRecord;
+    
     // Channel labels are at 256 + 16*i, each 16 bytes, for i in 0..numSignals-1
     const labels: string[] = [];
     for (let i = 0; i < numSignals; i++) {
@@ -79,6 +88,31 @@ async function readEDFFile(filePath: string): Promise<{signals: number[][], labe
         signals[signal].push(value);
       }
     }
+    
+    // Extract physical and digital min/max for each channel
+    const physMin: number[] = [];
+    const physMax: number[] = [];
+    const digMin: number[] = [];
+    const digMax: number[] = [];
+    for (let i = 0; i < numSignals; i++) {
+      // Each field is 8 bytes, see EDF spec
+      const physMinStart = 256 + 104 * numSignals + i * 8;
+      const physMaxStart = 256 + 112 * numSignals + i * 8;
+      const digMinStart = 256 + 120 * numSignals + i * 8;
+      const digMaxStart = 256 + 128 * numSignals + i * 8;
+      physMin.push(parseFloat(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(physMinStart, physMinStart + 8))).trim()));
+      physMax.push(parseFloat(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(physMaxStart, physMaxStart + 8))).trim()));
+      digMin.push(parseInt(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(digMinStart, digMinStart + 8))).trim()));
+      digMax.push(parseInt(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(digMaxStart, digMaxStart + 8))).trim()));
+    }
+    // Log mean value of every channel in microvolts (scientific notation)
+    labels.forEach((label, i) => {
+      const signal = signals[i];
+      const meanDigital = signal.reduce((sum, v) => sum + v, 0) / signal.length;
+      // Convert mean to microvolts
+      const meanPhysical = ((meanDigital - digMin[i]) * (physMax[i] - physMin[i]) / (digMax[i] - digMin[i])) + physMin[i];
+      console.log(`Channel ${i} (${label}): mean = ${meanPhysical.toExponential(6)} uV`);
+    });
     
     return { signals, labels };
   } catch (error) {
@@ -132,6 +166,16 @@ function getWindowStart(totalLength: number): number {
 function renderWindow() {
   // Remove all objects except camera lights (if any)
   while (scene.children.length > 0) scene.remove(scene.children[0]);
+
+  // Show current time window above the scrollbar
+  const timeDiv = document.getElementById('time-range');
+  if (timeDiv && globalSignals.length > 0 && DATA_CONFIG.samplingRate > 0) {
+    const start = getWindowStart(globalSignals[0].length);
+    const end = Math.min(start + DATA_CONFIG.maxPointsPerWave, globalSignals[0].length);
+    const startSec = (start / DATA_CONFIG.samplingRate).toFixed(2);
+    const endSec = (end / DATA_CONFIG.samplingRate).toFixed(2);
+    timeDiv.textContent = `Viewing: ${startSec} to ${endSec} seconds`;
+  }
 
   const colors = [
     0xff0000, 0xff7f00, 0xffff00, 0x00ff00, 0x0000ff,
