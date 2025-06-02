@@ -79,7 +79,7 @@ async function readEDFFile(filePath: string): Promise<number[][]> {
 }
 
 // Create waves
-const waves: THREE.LineSegments[] = [];
+const waves: THREE.Line[] = [];
 const colors = [
   0xff0000, 0xff7f00, 0xffff00, 0x00ff00, 0x0000ff,
   0x4b0082, 0x9400d3, 0xff1493, 0x00ffff, 0xffffff
@@ -90,8 +90,8 @@ async function initializeVisualization() {
   try {
     const signals = await readEDFFile('/demo.edf');
     
-    // Take only first 8 channels
-    const selectedSignals = signals.slice(0, 8);
+    // Take only the configured number of channels
+    const selectedSignals = signals.slice(0, DATA_CONFIG.numSources);
     
     // Create waves for each signal
     selectedSignals.forEach((signal, i) => {
@@ -99,7 +99,7 @@ async function initializeVisualization() {
       
       const points: THREE.Vector3[] = [];
       const xOffset = -9; // Start from left side
-      const yOffset = 4 - (i * 0.8); // Space waves vertically
+      const yOffset = 4 - (i * (8 / DATA_CONFIG.numSources)); // Scale vertical spacing based on numSources
 
       decimatedData.forEach((value, index) => {
         const x = (index / decimatedData.length) * 18 + xOffset; // Scale x to fit view
@@ -113,7 +113,7 @@ async function initializeVisualization() {
         linewidth: 1
       });
       
-      const wave = new THREE.LineSegments(geometry, material);
+      const wave = new THREE.Line(geometry, material);
       waves.push(wave);
       scene.add(wave);
     });
