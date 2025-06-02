@@ -6,6 +6,7 @@ const DATA_CONFIG = {
   samplingRate: 512, // Hz
   duration: 2 * 60 * 60, // 2 hours in seconds
   maxPointsPerWave: 2000, // Maximum points to render per wave
+  amplitudeScale: 2.0, // Multiplicative factor for signal amplitude
 } as const;
 
 // Calculate total samples
@@ -41,16 +42,40 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-// Generate sample data (replace this with your actual data source)
-function generateSampleData(sourceIndex: number): number[] {
-  const data: number[] = [];
-  for (let i = 0; i < totalSamples; i++) {
-    // Generate a sample sine wave with some noise
-    const t = i / DATA_CONFIG.samplingRate;
-    const frequency = 10 + sourceIndex * 0.5; // Different frequency for each source
-    data.push(Math.sin(2 * Math.PI * frequency * t) + (Math.random() - 0.5) * 0.1);
+// Function to read EDF file
+async function readEDFFile(filePath: string): Promise<number[][]> {
+  try {
+    const response = await fetch(filePath);
+    const arrayBuffer = await response.arrayBuffer();
+    const dataView = new DataView(arrayBuffer);
+    
+    // Read header information
+    const numSignals = parseInt(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(252, 256))).trim());
+    const numDataRecords = parseInt(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(236, 244))).trim());
+    const durationOfDataRecord = parseFloat(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(244, 252))).trim());
+    
+    // Calculate header size and data start position
+    const headerSize = 256 + (256 * numSignals);
+    const dataStart = headerSize;
+    
+    // Read signals
+    const signals: number[][] = Array(numSignals).fill(0).map(() => []);
+    const bytesPerValue = 2; // EDF uses 16-bit integers
+    
+    for (let record = 0; record < numDataRecords; record++) {
+      const recordStart = dataStart + (record * numSignals * bytesPerValue);
+      
+      for (let signal = 0; signal < numSignals; signal++) {
+        const value = dataView.getInt16(recordStart + (signal * bytesPerValue), true);
+        signals[signal].push(value);
+      }
+    }
+    
+    return signals;
+  } catch (error) {
+    console.error('Error reading EDF file:', error);
+    throw error;
   }
-  return data;
 }
 
 // Create waves
@@ -60,29 +85,44 @@ const colors = [
   0x4b0082, 0x9400d3, 0xff1493, 0x00ffff, 0xffffff
 ];
 
-// Initialize waves with decimated data
-for (let i = 0; i < DATA_CONFIG.numSources; i++) {
-  const rawData = generateSampleData(i);
-  const decimatedData = decimateData(rawData, DATA_CONFIG.maxPointsPerWave);
-  
-  const points: THREE.Vector3[] = [];
-  const yOffset = 4 - (i * (8 / DATA_CONFIG.numSources)); // Scale vertical spacing
+// Initialize visualization with EDF data
+async function initializeVisualization() {
+  try {
+    const signals = await readEDFFile('/demo.edf');
+    
+    // Take only first 8 channels
+    const selectedSignals = signals.slice(0, 8);
+    
+    // Create waves for each signal
+    selectedSignals.forEach((signal, i) => {
+      const decimatedData = decimateData(signal, DATA_CONFIG.maxPointsPerWave);
+      
+      const points: THREE.Vector3[] = [];
+      const xOffset = -9; // Start from left side
+      const yOffset = 4 - (i * 0.8); // Space waves vertically
 
-  decimatedData.forEach((value, index) => {
-    const x = (index / decimatedData.length) * 20 - 10;
-    const y = value * 0.3 + yOffset;
-    points.push(new THREE.Vector3(x, y, 0));
-  });
+      decimatedData.forEach((value, index) => {
+        const x = (index / decimatedData.length) * 18 + xOffset; // Scale x to fit view
+        const y = (value / 32768) * DATA_CONFIG.amplitudeScale + yOffset; // Apply amplitude scaling
+        points.push(new THREE.Vector3(x, y, 0));
+      });
 
-  const geometry = new THREE.BufferGeometry().setFromPoints(points);
-  const material = new THREE.LineBasicMaterial({ 
-    color: colors[i % colors.length],
-    linewidth: 1
-  });
-  
-  const wave = new THREE.LineSegments(geometry, material);
-  waves.push(wave);
-  scene.add(wave);
+      const geometry = new THREE.BufferGeometry().setFromPoints(points);
+      const material = new THREE.LineBasicMaterial({ 
+        color: colors[i % colors.length],
+        linewidth: 1
+      });
+      
+      const wave = new THREE.LineSegments(geometry, material);
+      waves.push(wave);
+      scene.add(wave);
+    });
+
+    // Initial render
+    renderer.render(scene, camera);
+  } catch (error) {
+    console.error('Failed to initialize visualization:', error);
+  }
 }
 
 // Handle window resize
@@ -95,5 +135,5 @@ window.addEventListener('resize', () => {
   renderer.render(scene, camera);
 });
 
-// Initial render
-renderer.render(scene, camera); 
+// Start visualization
+initializeVisualization();
