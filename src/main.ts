@@ -2,10 +2,10 @@ import * as THREE from 'three';
 
 // Data configuration
 const DATA_CONFIG = {
-  numSources: 8,
-  samplingRate: 512, // Hz
-  duration: 2 * 60 * 60, // 2 hours in seconds
-  maxPointsPerWave: 2000, // Maximum points to render per wave
+  numSources: 60,
+  samplingRate: 600, // Hz
+  duration: 278, // 2 hours in seconds
+  maxPointsPerWave: 100, // Maximum points to render per wave
   amplitudeScale: 2.0, // Multiplicative factor for signal amplitude
 } as const;
 
@@ -42,8 +42,8 @@ const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-// Function to read EDF file
-async function readEDFFile(filePath: string): Promise<number[][]> {
+// Function to read EDF file and extract labels
+async function readEDFFile(filePath: string): Promise<{signals: number[][], labels: string[]}> {
   try {
     const response = await fetch(filePath);
     const arrayBuffer = await response.arrayBuffer();
@@ -53,6 +53,15 @@ async function readEDFFile(filePath: string): Promise<number[][]> {
     const numSignals = parseInt(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(252, 256))).trim());
     const numDataRecords = parseInt(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(236, 244))).trim());
     const durationOfDataRecord = parseFloat(new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(244, 252))).trim());
+    
+    // Channel labels are at 256 + 16*i, each 16 bytes, for i in 0..numSignals-1
+    const labels: string[] = [];
+    for (let i = 0; i < numSignals; i++) {
+      const start = 256 + i * 16;
+      const end = start + 16;
+      const label = new TextDecoder().decode(new Uint8Array(arrayBuffer.slice(start, end))).trim();
+      labels.push(label);
+    }
     
     // Calculate header size and data start position
     const headerSize = 256 + (256 * numSignals);
@@ -71,11 +80,34 @@ async function readEDFFile(filePath: string): Promise<number[][]> {
       }
     }
     
-    return signals;
+    return { signals, labels };
   } catch (error) {
     console.error('Error reading EDF file:', error);
     throw error;
   }
+}
+
+// Helper to create a text sprite
+function makeTextSprite(message: string, color: string = '#ffffff', fontSize: number = 48): THREE.Sprite {
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d')!;
+  context.font = `${fontSize}px Arial`;
+  // Set canvas size based on text
+  const textWidth = context.measureText(message).width;
+  canvas.width = textWidth;
+  canvas.height = fontSize * 1.2;
+  // Redraw with correct size
+  context.font = `${fontSize}px Arial`;
+  context.fillStyle = color;
+  context.textBaseline = 'top';
+  context.textAlign = 'right';
+  context.fillText(message, textWidth, 0);
+  const texture = new THREE.CanvasTexture(canvas);
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+  const sprite = new THREE.Sprite(material);
+  // Scale sprite to reasonable size in world units
+  sprite.scale.set(0.75, 0.25, 1);
+  return sprite;
 }
 
 // Create waves
@@ -85,41 +117,80 @@ const colors = [
   0x4b0082, 0x9400d3, 0xff1493, 0x00ffff, 0xffffff
 ];
 
+let globalSignals: number[][] = [];
+let globalLabels: string[] = [];
+let scrollbar: HTMLInputElement | null = null;
+
+// Helper to get the current window start index based on scrollbar
+function getWindowStart(totalLength: number): number {
+  if (!scrollbar) return 0;
+  const scrollValue = parseInt(scrollbar.value);
+  return Math.min(scrollValue, Math.max(0, totalLength - DATA_CONFIG.maxPointsPerWave));
+}
+
+// Redraw the plot for the current window
+function renderWindow() {
+  // Remove all objects except camera lights (if any)
+  while (scene.children.length > 0) scene.remove(scene.children[0]);
+
+  const colors = [
+    0xff0000, 0xff7f00, 0xffff00, 0x00ff00, 0x0000ff,
+    0x4b0082, 0x9400d3, 0xff1493, 0x00ffff, 0xffffff
+  ];
+
+  const selectedSignals = globalSignals.slice(0, DATA_CONFIG.numSources);
+  const selectedLabels = globalLabels.slice(0, DATA_CONFIG.numSources);
+
+  selectedSignals.forEach((signal, i) => {
+    const start = getWindowStart(signal.length);
+    const end = Math.min(start + DATA_CONFIG.maxPointsPerWave, signal.length);
+    const windowData = signal.slice(start, end);
+    const decimatedData = decimateData(windowData, DATA_CONFIG.maxPointsPerWave);
+
+    const points: THREE.Vector3[] = [];
+    const xOffset = -9;
+    const yOffset = 4 - (i * (8 / DATA_CONFIG.numSources));
+
+    decimatedData.forEach((value, index) => {
+      const x = (index / decimatedData.length) * 18 + xOffset;
+      const y = (value / 32768) * DATA_CONFIG.amplitudeScale + yOffset;
+      points.push(new THREE.Vector3(x, y, 0));
+    });
+
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+    const material = new THREE.LineBasicMaterial({ 
+      color: colors[i % colors.length],
+      linewidth: 1
+    });
+    const wave = new THREE.Line(geometry, material);
+    scene.add(wave);
+
+    // Add channel label as a sprite
+    const labelSprite = makeTextSprite(selectedLabels[i], '#ffffff', 64);
+    labelSprite.position.set(xOffset - 1.2, yOffset, 0);
+    scene.add(labelSprite);
+  });
+
+  renderer.render(scene, camera);
+}
+
 // Initialize visualization with EDF data
 async function initializeVisualization() {
   try {
-    const signals = await readEDFFile('/demo.edf');
-    
-    // Take only the configured number of channels
-    const selectedSignals = signals.slice(0, DATA_CONFIG.numSources);
-    
-    // Create waves for each signal
-    selectedSignals.forEach((signal, i) => {
-      const decimatedData = decimateData(signal, DATA_CONFIG.maxPointsPerWave);
-      
-      const points: THREE.Vector3[] = [];
-      const xOffset = -9; // Start from left side
-      const yOffset = 4 - (i * (8 / DATA_CONFIG.numSources)); // Scale vertical spacing based on numSources
-
-      decimatedData.forEach((value, index) => {
-        const x = (index / decimatedData.length) * 18 + xOffset; // Scale x to fit view
-        const y = (value / 32768) * DATA_CONFIG.amplitudeScale + yOffset; // Apply amplitude scaling
-        points.push(new THREE.Vector3(x, y, 0));
-      });
-
-      const geometry = new THREE.BufferGeometry().setFromPoints(points);
-      const material = new THREE.LineBasicMaterial({ 
-        color: colors[i % colors.length],
-        linewidth: 1
-      });
-      
-      const wave = new THREE.Line(geometry, material);
-      waves.push(wave);
-      scene.add(wave);
-    });
-
-    // Initial render
-    renderer.render(scene, camera);
+    const { signals, labels } = await readEDFFile('/demo.edf');
+    globalSignals = signals;
+    globalLabels = labels;
+    scrollbar = document.getElementById('scrollbar') as HTMLInputElement;
+    if (scrollbar) {
+      const dataLen = signals[0].length;
+      const maxScroll = Math.max(0, dataLen - DATA_CONFIG.maxPointsPerWave);
+      scrollbar.max = maxScroll.toString();
+      scrollbar.value = '0';
+      scrollbar.disabled = dataLen <= DATA_CONFIG.maxPointsPerWave;
+      scrollbar.style.display = dataLen <= DATA_CONFIG.maxPointsPerWave ? 'none' : 'block';
+      scrollbar.addEventListener('input', () => renderWindow());
+    }
+    renderWindow();
   } catch (error) {
     console.error('Failed to initialize visualization:', error);
   }
@@ -132,7 +203,7 @@ window.addEventListener('resize', () => {
   camera.right = 10 * aspect;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.render(scene, camera);
+  renderWindow();
 });
 
 // Start visualization
